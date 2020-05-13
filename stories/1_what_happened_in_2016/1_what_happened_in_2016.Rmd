@@ -1,0 +1,197 @@
+---
+title: "O que aconteceu em 2016 em Linguagem e suas Ciências?"
+author: "Eduardo Bonet"
+date: "5/14/2020"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2, warn.conflicts = FALSE)
+library(tidyr, warn.conflicts = FALSE)
+library(rjson, warn.conflicts = FALSE)
+library(dplyr, warn.conflicts = FALSE)
+
+theme_set(theme_minimal())
+
+source("../../util/utils.R")
+
+```
+
+# Problema
+
+Como vemos na  (com código de reprodução ao longo do documento), observamos que a relação entre a nota que um aluno recebeu no Enem e o número de questões corretas possuem um formato bem definido, exceto na prova de Linguagens e sua Ciências em 2016. 
+![TRI vs Número de Acertos](https://user-images.githubusercontent.com/3444559/83645789-295e5b00-a5b3-11ea-9fd0-aca50169b106.png)
+
+
+Ao contrário das outras, a distribuição de notas para um mesmo número de acertos é bimodal, em vez de gaussiana. Isso é preocupante, pois pode indicar que houve error na computação das notas, ou que uma porção da população esteve em desvantagem. Entender a razão por trás dessa diferença é fundamental.
+
+# Carregando os dados
+
+Instruções sobre como preparar os dados podem ser encontradas no Readme do projeto.
+
+```{r}
+
+conn <- create.db.connection(config_file="../../config.json")
+
+DBI::dbGetQuery(conn, "select setseed(0.7)")
+
+query <- "
+SELECT * FROM microdados
+WHERE nu_ano=2016 AND tp_presenca_lc=TRUE AND random() < .01
+ORDER BY random()
+limit 40000
+
+"
+
+data <- DBI::dbGetQuery(conn, query)
+
+head(data)
+```
+
+Os dados possuem as respostas de cada usuário, e o gabarito de suas respectivas provas. Para analisar o número de questões corretas, precisamos comparar questão a questão:
+
+
+```{r}
+parsed <- data %>%
+      mutate_each(~strsplit(., ""), 
+                  c(tx_respostas_cn,tx_respostas_ch,tx_respostas_lc,tx_respostas_mt, 
+                    tx_gabarito_cn, tx_gabarito_ch, tx_gabarito_lc, tx_gabarito_mt)) %>%
+      mutate(
+        tx_corretas_lc = purrr::map2_chr(tx_respostas_lc, tx_gabarito_lc, ~paste0((.x == .y)*1, collapse = "")),
+        n_corretas_lc = purrr::map2_int(tx_respostas_lc, tx_gabarito_lc, ~sum((.x == .y)))
+      )
+```
+
+```{r}
+head(parsed[,c("tx_corretas_lc", "n_corretas_lc")])
+```
+
+Tendo o número de questões corretas, podemos visualizar como a nota TRI se compara com a nota clássica:
+
+```{r}
+ggplot(parsed %>% filter(nu_nota_lc > 0)) +
+  geom_point(aes(x=nu_nota_lc, y=n_corretas_lc), alpha=.2, colour="blue") +
+  labs(x="Nota TRI", y="Número de Questões corretas") +
+  ggtitle("TRI vs Questões Corretas, Linguagens e suas Ciências, 2016")
+```
+
+Observamos claramente um comportamento único nessa edição: existem dois grupos distintos. Isso é problemático, por que mostra que alguns alunos tiveram uma prova excepcionalmente difícil. Precisamos explorar melhor o conjunto de dados para entender o que está acontecendo. O primeiro motivo para a existência de provas diferentes é a escolha de diferente língua estrangeira. Podemos verificar a diferença:
+
+```{r}
+ggplot(
+  parsed %>% 
+    mutate(tp_lingua = as.factor(tp_lingua)) %>%
+    filter(nu_nota_lc > 0)
+  ) +
+  geom_point(aes(x=nu_nota_lc, y=n_corretas_lc, color=tp_lingua), alpha=.2) + 
+  labs(x="Nota TRI", y="Número de Questões corretas") +
+  ggtitle("TRI vs Questões Corretas, Linguagens e suas Ciências, 2016,\npor Lingua Estrangeira") + 
+  scale_color_brewer(palette = "Dark2", labels=c("Inglês", "Espanhol"), aesthetics = "colour" )
+```
+
+Pelo gráfico, observamos que dividir por língua estrangeira não dividiu muito bem os dois grupos, logo não é um bom candidato para o causador do problema. A próxima razão para provas diferentes é provas de cor diferente. A princípio, provas com core diferentes continuam tendo as mesmas questões, mas com ordem diferente, e não causariam o problema visto. Mesmo assim, vamos verificar:
+
+```{r}
+ggplot(
+  parsed %>% 
+    mutate(co_prova_lc = as.factor(co_prova_lc)) %>%
+    filter(nu_nota_lc > 0)
+  ) + 
+  labs(x="Nota TRI", y="Número de Questões corretas") +
+  ggtitle("TRI vs Questões Corretas, Linguagens e suas Ciências, 2016,\npor Código de Prova") + 
+  geom_point(aes(x=nu_nota_lc, y=n_corretas_lc, fill=co_prova_lc, color=co_prova_lc), alpha=.2)
+```
+
+
+Por incrível que pareça, o código da prova divide perfeitamente os dois grupos. Mais especificamente, códigos de prova com valores mais ficam mais para cima e para a esquerda que códigos de valores mais baixos, ou seja, para um mesmo número de questões certas, as provas com código mais alto tiraram uma nota TRI maior, indicando que essas provas são mais difíceis. Mas o código da prova não deveria influenciar em nada, então o que está acontencendo?
+
+Olhando no dicionário de dados, encontramos um fato interessante: os códigos mais altos se referem a provas reaplicadas. Pesquisando mais fundo, em 2016 o Enem foi reaplicado para uma parcela dos alunos em outra data, devido a prostestos e ocupações das escolas que occoreram na época, o que tornou vários pontos de prova inacessíveis. 
+
+Podemos olhar mais em detalhe a diferença entre os dois grupos, mar para isso precisamos reamostrar nossos dados: apenas 100 alunos dos 40000 selecionados fizeram a prova em outro dia, e ao selecionar aleatoriamente sem levar isso em conta teremos um conjunto de dados desbalanceado. Selecionaremos 20000 alunos que fizeram a prova antes, e 20000 alunos que fizeram a prova depois.
+
+```{r}
+parsed %>% 
+  mutate(reaplicado = as.factor(ifelse(co_prova_lc %in% c(299, 300, 301, 302), 0, 1))) %>%
+  select(reaplicado) %>%
+  summary()
+
+```
+
+
+```{r}
+query2 <- "
+
+SELECT * FROM (
+    SELECT *, 0 as reaplicada FROM microdados
+    WHERE nu_ano=2016 AND tp_presenca_lc=TRUE AND IF(co_prova_lc >= 341, 40, 0) * random()
+    limit 40000
+  ) as A UNION (
+    SELECT *, 1 as reaplicada FROM microdados
+    WHERE nu_ano=2016 AND tp_presenca_lc=TRUE AND co_prova_lc >= 341
+    limit 20000
+  )
+"
+
+data2 <- DBI::dbGetQuery(conn, query2)
+
+```
+
+```{r}
+head(data2)
+```
+
+```{r}
+parsed2 <- data2 %>%
+      filter(nu_nota_lc > 0) %>%
+      mutate(
+        reaplicada = as.factor(reaplicada),
+        co_prova_lc = as.factor(co_prova_lc)
+      ) %>%
+      mutate_each(~strsplit(., ""), 
+                  c(tx_respostas_cn,tx_respostas_ch,tx_respostas_lc,tx_respostas_mt, 
+                    tx_gabarito_cn, tx_gabarito_ch, tx_gabarito_lc, tx_gabarito_mt)) %>%
+      mutate(
+        tx_corretas_cn = purrr::map2_chr(tx_respostas_cn, tx_gabarito_cn, ~paste0((.x == .y)*1, collapse = "")),
+        tx_corretas_ch = purrr::map2_chr(tx_respostas_ch, tx_gabarito_ch, ~paste0((.x == .y)*1, collapse = "")),
+        tx_corretas_lc = purrr::map2_chr(tx_respostas_lc, tx_gabarito_lc, ~paste0((.x == .y)*1, collapse = "")),
+        tx_corretas_mt = purrr::map2_chr(tx_respostas_mt, tx_gabarito_mt, ~paste0((.x == .y)*1, collapse = "")),
+        n_corretas_cn = purrr::map2_int(tx_respostas_cn, tx_gabarito_cn, ~sum((.x == .y))),
+        n_corretas_ch = purrr::map2_int(tx_respostas_ch, tx_gabarito_ch, ~sum((.x == .y))),
+        n_corretas_lc = purrr::map2_int(tx_respostas_lc, tx_gabarito_lc, ~sum((.x == .y))),
+        n_corretas_mt = purrr::map2_int(tx_respostas_mt, tx_gabarito_mt, ~sum((.x == .y)))
+      )
+
+
+```
+
+
+```{r}
+
+
+ggplot(parsed2) +
+  geom_density(aes(x=nu_nota_lc, color=reaplicada, fill=reaplicada), size=1, alpha=.3) + 
+  labs(color = "Aplicação da Prova", fill="Aplicação da Prova", x="Nota ENEM", y="") +
+  scale_color_brewer(palette = "Accent", labels=c("Primeira Aplicação", "Segunda Aplicação"), aesthetics = c("colour", "fill") )
+
+```
+
+Podemos ver visivilmente que a curva de notas da primeira aplicação é levemente mais para a direita que a da segunda aplicação. Podemos ser um pouco mais rigoros e usar um teste estatístico:
+
+```{r}
+
+m <- lm(parsed2$nu_nota_lc ~ parsed2$reaplicada)
+summary(m)
+```
+
+Traduzindo, temos uma evidência forte que as distribuições de notas são, de fato, diferentes, com diferença de 6.8 pontos na média.
+
+# O que tudo isso significa?
+
+A conclusão obtida a partir desse estudo é preocupante. Ela mostra que as provas originais e reaplicadas para Linguagem e suas Ciências não são comparáveis, sendo que os alunos que fizeram a prova na dota correta tiveram uma vantagem sistemática no geral, apesar da diferença entre as duas notas ser menor na escala TRI do que na escala clássica. Ironicamente, como em geral os alunos da segunda prova erraram muito mais, o que foram melhor nessa prova tiraram notas melhores, por estarem mais longe da média (como preve o cálculo TRI).
+
+Essa diferença de notas (7 pontos na média) parece inicialmente pequena, mas é o suficiente para eliminar um aluno que esteja tentando uma concurso concorrido. Da mesma forma, alunos que foram muito bem na segunda prova tiraram notas que seriam impossíveis para os alunos da primeira prova, justamente por ser uma prova mais difícil, mesmo que os alunos tenham habilidades similares. 
+
+Para ilustrar melhor, é como se os alunos da primeira prova tivessem feito um teste de resistência onde deveriam correr 1km, enquanto os alunos da segunda prova tiveram que correr 2km. Em média mais alunos terminariam a prova de 1km, mas alguns desses alunos também conseguiriam finalizar a prova de 2km, mas não tiveram oportunidade de mostrar isso, por que sua corrida era limitada a 1km. Exemplo disso é que alguns anos atrás o Enem teve sua primeira nota acima de 1000, exatamente em uma prova considerada mais difícil que nos anos anteriores. Observamos o mesmo aqui, obversando que os melhores 10% dos alunos que fizeram a segunda prova tiraram em média x pontos a mais do que os que fizeram a primeira prova.
+
+

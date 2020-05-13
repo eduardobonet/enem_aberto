@@ -1,0 +1,10 @@
+parsed_data/*
+raw_data/*
+*.swp
+config.json
+!Readme.md
+
+.Rproj.user
+*.Rproj
+*.RData
+*.RHistory

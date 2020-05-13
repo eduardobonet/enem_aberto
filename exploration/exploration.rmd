@@ -1,0 +1,154 @@
+---
+title: "Análise Exploratória"
+author: "Eduardo Bonet"
+date: "5/14/2020"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r}
+require("RPostgreSQL")
+library(ggplot2, warn.conflicts = FALSE)
+library(tidyr, warn.conflicts = FALSE)
+library(dplyr, warn.conflicts = FALSE)
+library(rjson, warn.conflicts = FALSE)
+```
+
+```{r}
+
+drv <- dbDriver("PostgreSQL")
+
+conf <- fromJSON(file="config.json")
+
+
+# TODO read from local file
+con <- dbConnect(
+  drv, 
+  dbname = conf$DB_NAME,
+  host = conf$DB_HOST, 
+  port = conf$DB_PORT,
+  user = conf$DB_USER, 
+  password = { conf$DB_PASSWORD }
+)
+
+do.query <- (function (conn) function (query) dbGetQuery(conn, query))(con)
+
+```
+
+
+- Provas possuem questões em ordem diferente, é necessário remapear para que fiquem no mesmo padrão, ou focar em um tipo de prova.
+
+```{r}
+do.query("SELECT * FROM microdados limit 2")
+```
+
+```{r}
+data <- do.query("SELECT * FROM microdados ORDER BY random() limit 40000")
+```
+
+```{r}
+theme_set(theme_minimal())
+df <- as.data.frame(data) %>% 
+  filter(nu_ano > 2014) %>%
+  mutate(nu_ano = as.factor(nu_ano))
+```
+
+```{r, fig.width=10, fig.height=3}
+pdata <- df %>% 
+  select(nu_ano, nu_nota_cn, nu_nota_ch, nu_nota_lc, nu_nota_mt) %>%
+  pivot_longer(-nu_ano, values_to = "Nota", names_to = "Prova") %>%
+  filter(Nota > 0)
+
+ggplot(pdata) +
+  geom_density(aes(x=Nota, color=nu_ano)) +
+  facet_grid(. ~ Prova)
+
+```
+
+```{r}
+df %>% head()
+```
+
+## Número de questões corretas
+
+```{r}
+n.corretas <- df %>%
+  select(nu_inscricao, tx_respostas_cn, tx_gabarito_ch, tx_respostas_ch, tx_gabarito_cn, tx_respostas_lc, tx_gabarito_lc, tx_respostas_mt, tx_gabarito_mt) %>%
+  mutate_each(~strsplit(., ""), -nu_inscricao) %>%
+  mutate(
+    tx_corretas_cn = purrr::map2_chr(tx_respostas_cn, tx_gabarito_cn, ~paste0((.x == .y)*1, collapse = "")),
+    tx_corretas_ch = purrr::map2_chr(tx_respostas_ch, tx_gabarito_ch, ~paste0((.x == .y)*1, collapse = "")),
+    tx_corretas_lc = purrr::map2_chr(tx_respostas_lc, tx_gabarito_lc, ~paste0((.x == .y)*1, collapse = "")),
+    tx_corretas_mt = purrr::map2_chr(tx_respostas_mt, tx_gabarito_mt, ~paste0((.x == .y)*1, collapse = "")),
+    n_corretas_cn = purrr::map2_int(tx_respostas_cn, tx_gabarito_cn, ~sum((.x == .y))),
+    n_corretas_ch = purrr::map2_int(tx_respostas_ch, tx_gabarito_ch, ~sum((.x == .y))),
+    n_corretas_lc = purrr::map2_int(tx_respostas_lc, tx_gabarito_lc, ~sum((.x == .y))),
+    n_corretas_mt = purrr::map2_int(tx_respostas_mt, tx_gabarito_mt, ~sum((.x == .y)))
+  ) %>% 
+  select(
+    nu_inscricao,
+    tx_corretas_cn, tx_corretas_ch, tx_corretas_lc, tx_corretas_mt,
+    n_corretas_cn, n_corretas_ch, n_corretas_lc, n_corretas_mt
+  )
+```
+
+
+```{r}
+
+head(n.corretas)
+```
+
+
+```{r}
+df <- df %>% bind_cols(n.corretas)
+```
+
+```{r, fig.width=10, fig.height=5}
+pdata <- df %>% 
+  select(
+    nu_ano, 
+    n_corretas_cn, n_corretas_ch, n_corretas_lc, n_corretas_mt,
+    nu_nota_cn, nu_nota_ch, nu_nota_lc, nu_nota_mt
+    ) %>%
+  filter(nu_nota_cn  > 10 && nu_nota_ch > 10 && nu_nota_lc > 10 && nu_nota_mt > 10 ) %>% 
+  pivot_longer(-nu_ano, values_to = "Nota", names_to = "Coluna") %>%
+  separate(Coluna, c("Trash", "Metrica", "Prova"), sep="_") %>%
+  mutate(Metrica = ifelse(Metrica == "nota", "Questões Corretas", "TRI"))
+  
+
+
+ggplot(pdata) +
+  geom_density(aes(x=Nota, color=nu_ano)) +
+  facet_wrap(Metrica ~ Prova, scales="free", ncol = 4)
+```
+
+```{r, fig.width=8, fig.height=6}
+
+pdata <- df %>% 
+  select(
+    nu_ano, 
+    n_corretas_cn, n_corretas_ch, n_corretas_lc, n_corretas_mt,
+    nu_nota_cn, nu_nota_ch, nu_nota_lc, nu_nota_mt
+    ) %>%
+  filter((n_corretas_cn  > 0) & (n_corretas_ch > 0) & (n_corretas_lc > 0) & (n_corretas_mt > 0) ) %>% 
+  pivot_longer(-nu_ano, values_to = "Nota", names_to = "Coluna") %>%
+  separate(Coluna, c("Trash", "Metrica", "Prova"), sep="_") %>%
+  mutate(Metrica = ifelse(Metrica == "nota", "TRI", "classica")) %>%
+  pivot_wider(id_cols = c(nu_ano, Prova), names_from = Metrica, values_from = Nota, values_fn = list(Nota = list)) %>%
+  unnest(cols = c(TRI, classica))
+
+ggplot(pdata) +
+  geom_point(aes(x=classica, y=TRI, color=nu_ano), alpha=.4) +
+  facet_grid(Prova ~ nu_ano, scales="free") + 
+  geom_smooth(aes(x=classica, y=TRI), method='lm', formula= y~x)
+
+```
+ 
+ - A relação TRI ~ Classica não é linear no geral
+ - A partir de 25 acertos, TRI ~ Classica pode ser aproximado por um modelo linear
+ - Antes dos 25 acertos, a curva é menos linear. Provavelmente por que o número de combinações corretas para chegar naquele ponto é maior, além de ser mais fácil de chegar por chute.
+
+## A Cor da prova faz diferença?
+
