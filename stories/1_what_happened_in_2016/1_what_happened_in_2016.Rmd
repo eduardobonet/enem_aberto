@@ -11,6 +11,7 @@ library(ggplot2, warn.conflicts = FALSE)
 library(tidyr, warn.conflicts = FALSE)
 library(rjson, warn.conflicts = FALSE)
 library(dplyr, warn.conflicts = FALSE)
+library("RPostgreSQL")
 
 theme_set(theme_minimal())
 
@@ -124,7 +125,7 @@ query2 <- "
 
 SELECT * FROM (
     SELECT *, 0 as reaplicada FROM microdados
-    WHERE nu_ano=2016 AND tp_presenca_lc=TRUE AND IF(co_prova_lc >= 341, 40, 0) * random()
+    WHERE nu_ano=2016 AND tp_presenca_lc=TRUE AND (CASE WHEN co_prova_lc < 341 THEN random() <.4 ELSE FALSE END) 
     limit 40000
   ) as A UNION (
     SELECT *, 1 as reaplicada FROM microdados
@@ -176,7 +177,7 @@ ggplot(parsed2) +
 
 ```
 
-Podemos ver visivilmente que a curva de notas da primeira aplicação é levemente mais para a direita que a da segunda aplicação. Podemos ser um pouco mais rigoros e usar um teste estatístico:
+Fica visível que a curva de notas da primeira aplicação é levemente mais para a direita que a da segunda aplicação. Podemos ser um pouco mais rigoros e usar um teste estatístico:
 
 ```{r}
 
