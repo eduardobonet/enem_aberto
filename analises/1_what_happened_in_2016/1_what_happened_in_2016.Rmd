@@ -15,7 +15,7 @@ library("RPostgreSQL")
 
 theme_set(theme_minimal())
 
-source("../../util/utils.R")
+source("../../util/R/utils.R")
 
 ```
 
